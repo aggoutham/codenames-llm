@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -24,6 +25,7 @@ class LogEntry:
     team: Team
     role: str  # "spymaster" | "operative"
     text: str
+    timestamp: float = field(default_factory=time.time)
 
 
 def _team_color(team: Team) -> CardColor:

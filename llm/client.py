@@ -23,17 +23,26 @@ class LLMClient:
         self.trace: list[dict] = []
         self.trace_limit = trace_limit
 
-    def chat(self, messages: list[dict], tag: str | None = None) -> str:
+    def chat(self, messages: list[dict], tag: str | None = None) -> tuple[str, dict]:
         """One raw call. `messages` is the FULL conversation so far - system, then
-        alternating user/assistant turns. The server has no memory; this list IS the memory."""
+        alternating user/assistant turns. The server has no memory; this list IS the memory.
+
+        Returns (text, usage) where usage is {prompt_tokens, completion_tokens, total_tokens}
+        (empty dict if the backend didn't report it).
+        """
         resp = self.client.chat.completions.create(
             model=self.model,
             messages=messages,
             temperature=0.7,
+            # Ollama defaults to a small 2048-token context window regardless of what
+            # the model supports. Our rolling conversation history can exceed that in a
+            # long game, silently truncating earlier turns - so we ask for more headroom.
+            extra_body={"options": {"num_ctx": 8192}},
         )
         text = resp.choices[0].message.content or ""
         self._record(tag, messages, resp, text)
-        return text
+        usage = resp.model_dump().get("usage") or {}
+        return text, usage
 
     def _record(self, tag: str | None, messages: list[dict], resp, text: str) -> None:
         self.trace.append(
@@ -48,10 +57,12 @@ class LLMClient:
         if len(self.trace) > self.trace_limit:
             del self.trace[: len(self.trace) - self.trace_limit]
 
-    def chat_json(self, messages: list[dict], retries: int = 2, tag: str | None = None) -> tuple[dict, str]:
+    def chat_json(
+        self, messages: list[dict], retries: int = 2, tag: str | None = None
+    ) -> tuple[dict, str, dict]:
         """Call the model and parse a JSON object from its reply.
 
-        Returns (parsed_dict, raw_text) - the caller appends raw_text to its own
+        Returns (parsed_dict, raw_text, usage) - the caller appends raw_text to its own
         history as the assistant turn. On a parse failure we retry using a scratch
         copy of the messages so a failed attempt doesn't pollute the caller's real
         conversation history.
@@ -60,9 +71,9 @@ class LLMClient:
         working = list(messages)
         for attempt in range(retries + 1):
             retry_tag = tag if attempt == 0 else f"{tag}-json-retry{attempt}"
-            text = self.chat(working, tag=retry_tag)
+            text, usage = self.chat(working, tag=retry_tag)
             try:
-                return _extract_json(text), text
+                return _extract_json(text), text, usage
             except ValueError as e:
                 last_error = e
                 working = working + [

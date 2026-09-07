@@ -1,0 +1,14 @@
+{
+  "local": {
+    "base_url": "http://localhost:11434/v1",
+    "model": "qwen2.5:7b-instruct-q4_K_M"
+  },
+  "azure": {
+    "base_url": "http://REPLACE_WITH_AZURE_VM_IP:11434/v1",
+    "model": "qwen2.5:7b-instruct-q4_K_M"
+  },
+  "runpod": {
+    "base_url": "https://REPLACE_WITH_POD_ID-11434.proxy.runpod.net/v1",
+    "model": "qwen2.5:7b-instruct-q4_K_M"
+  }
+}
