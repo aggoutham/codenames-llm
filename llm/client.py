@@ -17,7 +17,7 @@ class LLMClient:
 
     def __init__(self, base_url: str | None = None, model: str | None = None, trace_limit: int = 300):
         self.base_url = base_url or os.environ.get("LLM_BASE_URL", "http://localhost:11434/v1")
-        self.model = model or os.environ.get("LLM_MODEL", "qwen2.5:3b")
+        self.model = model or os.environ.get("LLM_MODEL", "qwen2.5:7b-instruct-q4_K_M")
         self.client = OpenAI(base_url=self.base_url, api_key="not-needed")
         # Every raw request/response passes through here - this is the debug trace.
         self.trace: list[dict] = []
