@@ -1,75 +1,90 @@
 # Codenames LLM
 
-I'm using this project to learn how small, free, open-source LLMs can be put to work on a narrow, focused job — in this case, playing Codenames as both the spymaster (gives a one-word clue) and the operative (guesses words from that clue). Everything from the game rules to the UI to the benchmarking harness is my own build; the LLMs only ever have to produce a clue or a guess as JSON.
+I built this to learn how small, free, open-source LLMs can be put to work on a narrow, focused job — here, playing Codenames as both the **spymaster** (gives a one-word clue and a count) and the **operative** (guesses words from that clue). The game rules, the UI and a benchmarking harness all live in this repo; the models only ever have to produce a clue or a guess as JSON.
 
 ![Codenames LLM game UI: remaining-card counts, turn and clue banner, board, and move log](pictures/screenshot.png)
 
-## What's here so far
+## Highlights
 
-- **A real Codenames rules engine** (`engine/`) — board generation, turn state machine, win/assassin logic. Pure Python, no LLM or UI code in it at all, so it can be reused by a future multiplayer backend later.
-- **LLM agents with actual conversation memory** (`agents/`) — each spymaster/operative keeps its own growing `messages[]` list across the whole game (system prompt once, then every turn appended), rather than re-deriving everything from scratch each call. Also tracks per-turn timing, retry counts, and token usage.
-- **Any seat can be human or LLM**, configurable per game — I can play a seat myself, or let two small models play each other end to end.
-- **A Streamlit UI** (`ui/app.py`) with the board, step/auto-play controls, and a toggle into a **debug view** that shows the raw request/response for every single model call (not just the parsed JSON) — messages sent, full response object, token counts.
-- **An OpenAI-compatible LLM client** (`llm/client.py`) — the same code talks to Ollama (local or cloud) or vLLM without changes, just a different `base_url`. This is what makes the multi-environment experiment below possible without forking any code per environment.
-- **A headless experiment harness** (`experiments/`) — see below.
+- **Full Codenames rules engine** — 5x5 board (9/8/7/1 split), turn state machine, assassin and win conditions. Pure Python with no LLM or UI code in it.
+- **Any seat can be human or LLM.** I can play a seat myself, or let two teams of small models play each other end to end.
+- **Spymaster that never skips a turn.** A three-tier clue strategy (below) guarantees a legal clue every turn, even from a weak model.
+- **Compact-history prompts.** Each model call gets the game history as a short JSON log plus the *current* board state — not an ever-growing transcript.
+- **Streamlit UI** with big remaining-card counts, a team-colored turn and clue banner, a move log, and a **debug view** showing the raw prompt, raw response and token counts of every model call.
+- **OpenAI-compatible client**, so the same code talks to Ollama locally, Ollama on a rented GPU, or anything else that speaks that API — just change the `base_url`.
+- **Headless benchmark harness** that plays batches of fully autonomous games and writes per-step timing, retry and token data to JSON.
 
-## Setup & running locally
+## How it works
+
+**Engine (`engine/`)** — board generation, turn order, guess resolution (correct card, opponent card, neutral, assassin) and win detection. Every log entry is timestamped.
+
+**Agents (`agents/`)**
+- *Spymaster* sees every card's true color and tries three tiers in order: (1) a holistic clue that can target several of its words, (2) if that keeps getting rejected, a narrowed ask for one easy, safe single-word clue with the opponent, neutral and assassin words listed explicitly, (3) a deterministic fixed fallback word with no LLM call. Clues are validated (single alphabetic word, no overlap with any board word) and retried with feedback.
+- *Operative* sees only the unrevealed words and the clue, guesses one word at a time, and can stop early by answering `null`.
+- *Prompts* are rebuilt fresh on every call from `[system, user]`, where the user turn carries a JSON history (`{"step", "team", "role", "action"}` per move) and the current state listing **only unrevealed words**. A revealed word can't leak back into a later prompt.
+- Each agent records how long its last move took, how many attempts it needed, which tier produced the clue, its reasoning, and token usage.
+
+**LLM client (`llm/client.py`)** — thin wrapper over the OpenAI chat API with JSON extraction and repair, plus a rolling trace of every raw request and response that the debug view displays.
+
+**UI (`ui/app.py`)** — Step / Auto-play controls (guarded by a lock so a second click can't race a slow in-flight model call), per-seat human/LLM checkboxes, a log toggle, and a debug toggle.
+
+## Run it locally
+
+Requires Python 3.9+ and [Ollama](https://ollama.com).
 
 ```bash
-cd codenames
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-```
 
-Install Ollama and pull a model:
-
-```bash
 brew install ollama
 ollama serve &
 ollama pull qwen2.5:7b-instruct-q4_K_M
-```
 
-On my Intel Mac this runs CPU-only (~3-8 tok/s for a 7B model) — fine for turn-based play and for validating everything works, too slow for fast prompt iteration or for a real benchmark batch. That gap is exactly why the Azure/RunPod side of the experiment plan below exists.
-
-Run the game:
-
-```bash
 streamlit run ui/app.py
 ```
 
-Sidebar: set the model name, check any seat you want to play yourself (unchecked = LLM), **New game**. **Step** advances one action at a time, **Auto-play** runs all-LLM turns until it needs human input, and the **Debug view** toggle switches the whole page over to the raw prompt/response trace.
+In the sidebar, tick any seat you want to play yourself (unticked = LLM) and click **New game**; seat changes take effect on the next New game. The default model is `qwen2.5:7b-instruct-q4_K_M`.
 
-## Experiment plan: local vs. Azure vs. RunPod
+## Benchmark harness
 
-The question I actually care about: **how much does the environment (hardware + serving stack) matter for a small model doing this specific job?** Not just "does it work," but concretely — how fast is each step, how often does the model need retries to produce valid output, how does token throughput compare, does a bigger/faster environment actually play *better* Codenames or just *faster* Codenames.
-
-To answer that without hand-running games, I built `experiments/run_experiment.py` — a headless script (no Streamlit) that plays a batch of fully-autonomous AI-vs-AI games against one or more environments defined in `experiments/environments.json`, and writes structured per-step JSON: timestamp, duration, retry count, prompt/completion tokens, and the model's reasoning for every single clue and guess, plus a rolled-up summary (win rates, average steps/game, average seconds/step, retry rate) per environment. It can run multiple environments concurrently and is capped at 80 steps/game as a safety net against a degenerate "operative always passes" infinite loop.
+`experiments/run_experiment.py` plays batches of AI-vs-AI games with no UI, against any environment defined in `experiments/environments.json` (a name, a `base_url` and a model). Because the client only needs an OpenAI-compatible endpoint, the same harness runs unchanged against local Ollama, a GPU VM, or a RunPod pod, so different hardware can be compared on identical games.
 
 ```bash
 python experiments/run_experiment.py --env local --games 15
-python experiments/run_experiment.py --env local azure runpod --games 15   # once all three exist
+python experiments/run_experiment.py --env local runpod --games 15   # environments run concurrently
 ```
 
-**Status of each environment:**
+- Starting team alternates game to game so first-move advantage doesn't skew win rates.
+- A step cap (default 80) ends a game as `timeout` instead of hanging if both sides degenerate into never revealing a card.
+- Results are written incrementally to `results/<env>_<timestamp>.json`, so a crash never loses completed games.
+- **Per step:** team, role, start time, duration, attempts, prompt/completion tokens, reasoning, clue/guess and outcome.
+- **Per environment summary:** games completed / timed out / errored, red vs. blue wins, average steps per game, average seconds per step and per game, average tokens per call, and retry rate.
 
-| Environment | Status |
-|---|---|
-| **Local** (Mac, CPU) | Working — harness validated end to end against `qwen2.5:7b-instruct-q4_K_M` via Ollama. |
-| **Azure** (`Standard_NC4as_T4_v3`, spot) | In progress. My default MSDN subscription can't get GPU quota approved (Microsoft excludes GPU SKUs from free/credit-type offers by policy) — spinning up a separate Pay-As-You-Go subscription to get around that. |
-| **RunPod** | Not started yet — planned as the lighter-weight comparison point (GPU marketplace, no quota system, pay per second). |
+**Pointing it at a remote GPU** — on the GPU machine:
 
-Once Azure and RunPod endpoints exist, I'll drop their URLs into `experiments/environments.json` and run the same 15-20 game batch against all three. What I'm planning to measure/visualize from the output JSON:
+```bash
+OLLAMA_HOST=0.0.0.0:11434 OLLAMA_CONTEXT_LENGTH=4096 ollama serve &
+ollama pull qwen2.5:7b-instruct-q4_K_M
+```
 
-- Time per step, and how that accumulates over a game (a "progression of time" view)
-- Games played vs. total steps vs. total wall-clock time, per environment
-- Tokens/sec throughput per environment (the real hardware comparison — CPU vs. T4 vs. whatever RunPod hands me)
-- Retry rate (how often the model fails to produce valid JSON/a valid clue) as a quality signal, per environment and per model
-- Red vs. Blue win rate, to sanity-check the game itself isn't biased toward whichever team goes first
+Then set that environment's `base_url` in `environments.json`: `http://<host>:11434/v1` for a VM, or `https://<POD_ID>-11434.proxy.runpod.net/v1` for a RunPod pod with HTTP port 11434 exposed. Pin the same `OLLAMA_CONTEXT_LENGTH` on every host so context size isn't a hidden variable between environments. Ollama has no authentication, so restrict access (firewall or security group) or shut the machine down when finished.
 
-The post-processing and any charts/dashboard happen after the data exists — not built yet, deliberately deferred until there's real data from all three environments to work with.
+## What I learned
 
-## Roadmap
+- **Model size decides whether the task is even possible.** A 3B model kept answering with words already on the board; the 7B model followed the "don't name a board word" rule with no prompt changes.
+- **A growing chat transcript made the models worse.** Old board snapshots stayed in context and the model kept considering already-revealed words. A fresh prompt per call (compact history plus current state) removes that failure by construction.
+- **A spymaster must never pass.** With a pass fallback, two weak spymasters could pass forever and the game never progressed — hence the three-tier clue strategy and the harness's step cap.
+- **Blocking model calls and Streamlit don't mix without care.** A second click during a slow call started a concurrent run against the same game object; a per-session lock fixed it.
+- **CPU inference is workable for turn-based play but slow.** On my CPU-only Intel MacBook a 7B model takes roughly 15–25 seconds per clue or guess — fine for playing, too slow for batch benchmarking, which is what the remote-GPU setup above is for.
 
-- **Multiplayer for up to 4 humans**, playable over the network with friends — the engine is already UI-agnostic, which is why I've kept `engine/` free of any Streamlit-specific code. Eventually I'd like to keep an instance of this live on the Azure VM so friends can join remotely.
-- **Beautify the experiment results** into charts for a GitHub write-up and a YouTube demo, once the three-environment data exists.
+## Project layout
+
+```
+engine/       game rules: board, turns, win conditions
+agents/       LLM and human seats, prompts, spymaster tiers
+llm/          OpenAI-compatible client with raw call trace
+ui/           Streamlit app
+experiments/  benchmark harness and environments.json
+words.py      generic board word pool (not the official Codenames list)
+```
