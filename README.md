@@ -2,6 +2,8 @@
 
 I'm using this project to learn how small, free, open-source LLMs can be put to work on a narrow, focused job — in this case, playing Codenames as both the spymaster (gives a one-word clue) and the operative (guesses words from that clue). Everything from the game rules to the UI to the benchmarking harness is my own build; the LLMs only ever have to produce a clue or a guess as JSON.
 
+![Codenames LLM game UI: remaining-card counts, turn and clue banner, board, and move log](pictures/screenshot.png)
+
 ## What's here so far
 
 - **A real Codenames rules engine** (`engine/`) — board generation, turn state machine, win/assassin logic. Pure Python, no LLM or UI code in it at all, so it can be reused by a future multiplayer backend later.
