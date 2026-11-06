@@ -72,6 +72,7 @@ def play_one_game(client: LLMClient, game_id: int, starting_team: Team, max_step
                 "started_at": started_at,
                 "duration_sec": round(agent.last_duration_sec, 3),
                 "attempts": agent.last_attempts,
+                "tier": agent.last_tier,
                 "prompt_tokens": agent.last_usage.get("prompt_tokens"),
                 "completion_tokens": agent.last_usage.get("completion_tokens"),
                 "reasoning": agent.last_reasoning,
@@ -95,6 +96,7 @@ def play_one_game(client: LLMClient, game_id: int, starting_team: Team, max_step
                 "started_at": started_at,
                 "duration_sec": round(agent.last_duration_sec, 3),
                 "attempts": agent.last_attempts,
+                "tier": None,
                 "prompt_tokens": agent.last_usage.get("prompt_tokens"),
                 "completion_tokens": agent.last_usage.get("completion_tokens"),
                 "reasoning": agent.last_reasoning,
@@ -127,6 +129,8 @@ def summarize(games: list[dict]) -> dict:
     prompt_tokens = [s["prompt_tokens"] for s in all_steps if s["prompt_tokens"] is not None]
     completion_tokens = [s["completion_tokens"] for s in all_steps if s["completion_tokens"] is not None]
     retried_steps = sum(1 for s in all_steps if s["attempts"] > 1)
+    spymaster_tiers = [s["tier"] for s in all_steps if s["role"] == "spymaster"]
+    tier_counts = {t: spymaster_tiers.count(t) for t in ("holistic", "safe_single", "deterministic")}
 
     def avg(xs):
         return round(sum(xs) / len(xs), 3) if xs else None
@@ -144,6 +148,11 @@ def summarize(games: list[dict]) -> dict:
         "avg_prompt_tokens_per_call": avg(prompt_tokens),
         "avg_completion_tokens_per_call": avg(completion_tokens),
         "retry_rate": round(retried_steps / len(all_steps), 3) if all_steps else None,
+        "spymaster_tier_counts": tier_counts,
+        # share of clues that needed anything beyond the first-choice holistic tier
+        "spymaster_fallback_rate": (
+            round(1 - tier_counts["holistic"] / len(spymaster_tiers), 3) if spymaster_tiers else None
+        ),
     }
 
 
@@ -167,7 +176,7 @@ def run_environment(name: str, cfg: dict, num_games: int, max_steps: int, out_di
 
     def on_step(s):
         detail = f"{s['clue_word']} {s['clue_count']}" if s["role"] == "spymaster" else f"{s['guess_word']} -> {s['guess_outcome']}"
-        log(name, f"  game {i} step {s['step_index']}: {s['team']} {s['role']} {detail} ({s['duration_sec']}s, {s['attempts']} attempt(s))")
+        log(name, f"  game {i} step {s['step_index']}: {s['team']} {s['role']} {detail} ({s['duration_sec']}s, {s['attempts']} attempt(s){', tier=' + s['tier'] if s['tier'] else ''})")
 
     games = []
     for i in range(1, num_games + 1):

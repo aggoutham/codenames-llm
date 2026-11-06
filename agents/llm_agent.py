@@ -20,6 +20,20 @@ from .prompts import (
 # this is what makes that guarantee unconditional rather than "usually."
 _DETERMINISTIC_FALLBACK_WORDS = ["THING", "ITEM", "OBJECT", "STUFF", "IDEA", "CONCEPT"]
 
+_NOT_JSON_MSG = "Your reply wasn't valid JSON. Reply with ONLY a single JSON object."
+_CLUE_SHAPE_MSG = 'Reply with a JSON object like {"clue": "WORD", "count": 1, "reasoning": "..."}.'
+_GUESS_SHAPE_MSG = 'Reply with a JSON object like {"guess": "WORD" or null, "reasoning": "..."}.'
+
+
+def _safe_chat_json(client: LLMClient, messages: list[dict], tag: str):
+    """chat_json, except a reply that stays unparseable after the client's own retries counts
+    as one failed attempt (data=None) instead of raising and voiding the whole turn.
+    Connection / HTTP errors are deliberately NOT caught here - those should surface."""
+    try:
+        return client.chat_json(messages, tag=tag)
+    except ValueError:
+        return None, "", {}
+
 
 class LLMSpymaster(SpymasterAgent):
     def __init__(self, team: Team, client: LLMClient, max_attempts: int = 3):
@@ -41,6 +55,7 @@ class LLMSpymaster(SpymasterAgent):
 
     def get_clue(self, game: Game) -> tuple[str, int]:
         start = time.perf_counter()
+        self.last_usage = {}  # so a step with no successful model call never inherits the previous step's tokens
         board_words = set(game.board.words())
         tag = f"{self.team.value}-spymaster"
 
@@ -62,30 +77,45 @@ class LLMSpymaster(SpymasterAgent):
         self.last_duration_sec = time.perf_counter() - start
         return word, count
 
+    @staticmethod
+    def _parse_clue(data, board_words: set[str], count_required: bool):
+        """Validate one model reply. Returns (word, count, None) if usable, else
+        (None, None, feedback_message_to_send_back_to_the_model)."""
+        if not isinstance(data, dict):
+            return None, None, _CLUE_SHAPE_MSG
+        word = str(data.get("clue", "")).strip().upper()
+        if not word.isalpha():
+            return None, None, f"'{word}' is not a single alphabetic word. Try again."
+        if any(word in w or w in word for w in board_words):
+            return None, None, f"'{word}' overlaps a board word. Choose a different word. Try again."
+        if not count_required:
+            return word, 1, None
+        try:
+            count = int(data.get("count", 0) or 0)
+        except (TypeError, ValueError):
+            return None, None, "count must be a whole number. Try again."
+        if count < 0:
+            return None, None, "count can't be negative. Try again."
+        return word, count, None
+
     def _try_holistic(self, game: Game, board_words: set[str], tag: str):
         """Tier 1 (cheap, usual case): one holistic ask across the whole board,
         may relate to multiple words. Up to self.max_attempts tries."""
         messages = [self.system_message, {"role": "user", "content": spymaster_user_turn(game, self.team)}]
 
         for attempt in range(self.max_attempts):
-            data, raw, usage = self.client.chat_json(messages, tag=tag)
+            data, raw, usage = _safe_chat_json(self.client, messages, tag)
+            if usage:
+                self.last_usage = usage
+            if data is None:
+                messages.append({"role": "user", "content": _NOT_JSON_MSG})
+                continue
             messages.append({"role": "assistant", "content": raw})
-            self.last_usage = usage
 
-            word = str(data.get("clue", "")).strip().upper()
-            count = int(data.get("count", 0) or 0)
-
-            if not word.isalpha():
-                messages.append(
-                    {"role": "user", "content": f"'{word}' is not a single alphabetic word. Try again."}
-                )
+            word, count, feedback = self._parse_clue(data, board_words, count_required=True)
+            if feedback:
+                messages.append({"role": "user", "content": feedback})
                 continue
-            if any(word in w or w in word for w in board_words):
-                messages.append(
-                    {"role": "user", "content": f"'{word}' overlaps a board word. Choose a different word. Try again."}
-                )
-                continue
-
             return word, count, data.get("reasoning"), attempt + 1, "holistic"
         return None
 
@@ -96,23 +126,18 @@ class LLMSpymaster(SpymasterAgent):
         fallback_attempts = 2
 
         for attempt in range(fallback_attempts):
-            data, raw, usage = self.client.chat_json(messages, tag=f"{tag}-fallback")
+            data, raw, usage = _safe_chat_json(self.client, messages, f"{tag}-fallback")
+            if usage:
+                self.last_usage = usage
+            if data is None:
+                messages.append({"role": "user", "content": _NOT_JSON_MSG})
+                continue
             messages.append({"role": "assistant", "content": raw})
-            self.last_usage = usage
 
-            word = str(data.get("clue", "")).strip().upper()
-
-            if not word.isalpha():
-                messages.append(
-                    {"role": "user", "content": f"'{word}' is not a single alphabetic word. One safe word, try again."}
-                )
+            word, _count, feedback = self._parse_clue(data, board_words, count_required=False)
+            if feedback:
+                messages.append({"role": "user", "content": feedback})
                 continue
-            if any(word in w or w in word for w in board_words):
-                messages.append(
-                    {"role": "user", "content": f"'{word}' overlaps a board word. Pick a different safe word."}
-                )
-                continue
-
             return word, 1, data.get("reasoning"), attempt + 1, "safe_single"
         return None
 
@@ -145,6 +170,8 @@ class LLMOperative(OperativeAgent):
             self._guessed_this_turn = []  # new turn started
 
         start = time.perf_counter()
+        self.last_usage = {}
+        self.last_reasoning = None
         messages = [
             self.system_message,
             {"role": "user", "content": operative_user_turn(game, self._guessed_this_turn)},
@@ -153,13 +180,21 @@ class LLMOperative(OperativeAgent):
         tag = f"{self.team.value}-operative"
 
         for attempt in range(self.max_attempts):
-            data, raw, usage = self.client.chat_json(messages, tag=tag)
+            data, raw, usage = _safe_chat_json(self.client, messages, tag)
+            if usage:
+                self.last_usage = usage
+            if data is None:
+                messages.append({"role": "user", "content": _NOT_JSON_MSG})
+                continue
             messages.append({"role": "assistant", "content": raw})
-            self.last_usage = usage
+            if not isinstance(data, dict):
+                messages.append({"role": "user", "content": _GUESS_SHAPE_MSG})
+                continue
 
             self.last_reasoning = data.get("reasoning")
             guess = data.get("guess")
-            if guess is None:
+            # The prompt says "guess=null"; small models sometimes write the string "null" instead.
+            if guess is None or (isinstance(guess, str) and guess.strip().lower() in ("", "null", "none")):
                 self.last_attempts = attempt + 1
                 self.last_duration_sec = time.perf_counter() - start
                 return None

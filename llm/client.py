@@ -10,15 +10,34 @@ from openai import OpenAI
 class LLMClient:
     """Thin wrapper around an OpenAI-compatible chat endpoint.
 
-    Points at local Ollama by default. Swapping to Azure later is just
-    changing OLLAMA_BASE_URL / MODEL_NAME env vars to the vLLM endpoint -
-    no code changes needed.
+    Points at local Ollama by default. Pointing it at a remote GPU host is just a
+    different base_url / model (constructor args, or the LLM_BASE_URL / LLM_MODEL env
+    vars) - no code changes needed.
+
+    Context length is a SERVER setting (OLLAMA_CONTEXT_LENGTH on the Ollama host):
+    Ollama's OpenAI-compatible endpoint ignores a per-request num_ctx.
     """
 
-    def __init__(self, base_url: str | None = None, model: str | None = None, trace_limit: int = 300):
+    def __init__(
+        self,
+        base_url: str | None = None,
+        model: str | None = None,
+        trace_limit: int = 300,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+    ):
         self.base_url = base_url or os.environ.get("LLM_BASE_URL", "http://localhost:11434/v1")
         self.model = model or os.environ.get("LLM_MODEL", "qwen2.5:7b-instruct-q4_K_M")
-        self.client = OpenAI(base_url=self.base_url, api_key="not-needed")
+        # Explicit limits. The SDK default is a 10-minute timeout plus 2 silent retries, which
+        # against a remote GPU means one hung request stalls a run for 10 minutes and retried
+        # requests quietly inflate the timings we're trying to measure.
+        if timeout is None:
+            timeout = float(os.environ.get("LLM_TIMEOUT_SEC", "180"))
+        if max_retries is None:
+            max_retries = int(os.environ.get("LLM_MAX_RETRIES", "1"))
+        self.client = OpenAI(
+            base_url=self.base_url, api_key="not-needed", timeout=timeout, max_retries=max_retries
+        )
         # Every raw request/response passes through here - this is the debug trace.
         self.trace: list[dict] = []
         self.trace_limit = trace_limit
@@ -34,10 +53,6 @@ class LLMClient:
             model=self.model,
             messages=messages,
             temperature=0.7,
-            # Ollama defaults to a small 2048-token context window regardless of what
-            # the model supports. Our rolling conversation history can exceed that in a
-            # long game, silently truncating earlier turns - so we ask for more headroom.
-            extra_body={"options": {"num_ctx": 8192}},
         )
         text = resp.choices[0].message.content or ""
         self._record(tag, messages, resp, text)

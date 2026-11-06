@@ -58,8 +58,9 @@ python experiments/run_experiment.py --env local runpod --games 15   # environme
 - Starting team alternates game to game so first-move advantage doesn't skew win rates.
 - A step cap (default 80) ends a game as `timeout` instead of hanging if both sides degenerate into never revealing a card.
 - Results are written incrementally to `results/<env>_<timestamp>.json`, so a crash never loses completed games.
-- **Per step:** team, role, start time, duration, attempts, prompt/completion tokens, reasoning, clue/guess and outcome.
-- **Per environment summary:** games completed / timed out / errored, red vs. blue wins, average steps per game, average seconds per step and per game, average tokens per call, and retry rate.
+- **Per step:** team, role, start time, duration, attempts, spymaster tier, prompt/completion tokens, reasoning, clue/guess and outcome.
+- **Per environment summary:** games completed / timed out / errored, red vs. blue wins, average steps per game, average seconds per step and per game, average tokens per call, retry rate, and how often the spymaster needed its fallback tiers.
+- Model calls use an explicit timeout and retry limit (180 s and 1 retry by default; override with `LLM_TIMEOUT_SEC` / `LLM_MAX_RETRIES`), so a hung remote host fails fast and silent retries can't distort timings.
 
 **Pointing it at a remote GPU** — on the GPU machine:
 
